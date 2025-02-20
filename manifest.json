@@ -1,0 +1,17 @@
+{
+  "name": "TDS - Persian Component Configuration Mapping",
+  "id": "1469083130937982762",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": [
+    "figma"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  }
+}
