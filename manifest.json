@@ -9,6 +9,13 @@
   "editorType": [
     "figma"
   ],
+  "relaunchButtons": [
+    {
+      "command": "convert",
+      "name": "Convert Description",
+      "multipleSelection": true
+    }
+  ],
   "networkAccess": {
     "allowedDomains": [
       "none"
