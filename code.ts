@@ -1,28 +1,37 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // TDS – Persian Component Configuration Mapping
 //
-// Purpose: transliterate Latin characters in component descriptions to their
-// Persian equivalents based on the standard Persian (ISIRI 9147) keyboard
-// layout. Designers who accidentally type with the wrong keyboard layout end
-// up with Latin characters that look like gibberish — this plugin converts
-// them back to the intended Persian text.
+// Algorithm (runs on each selected ComponentNode / ComponentSetNode):
 //
-// Example:
-//   "Google"      →  "لخخلمث"
-//   "Saraf gift"  →  "سشقشب لهبف"
+//  Step 1 — Strip existing Persian lines from description.
+//           Any line that contains Persian/Arabic script characters AND no
+//           Latin characters is removed. These are always previous plugin
+//           output — a clean slate before re-inserting.
 //
-// Only ComponentNode and ComponentSetNode are processed — never InstanceNode,
-// because an instance shares its `description` with its master component and
-// writing to it would silently mutate the master and affect every instance of
-// that component across the file.
+//  Step 2 — Find every line in the description that starts with "alt name:"
+//           (dot after "alt" is optional; matching is case-insensitive).
+//
+//  Step 3 — Transliterate the value after "alt name:" using the standard
+//           Persian keyboard layout (ISIRI 9147) and insert the result on
+//           the line immediately below the "alt name:" line.
+//
+//  Step 4 — Transliterate the component's name field to Persian.
+//
+//  Step 5 — Every other line in the description is left completely unchanged.
+//
+// Example
+// ───────
+//   Before:  alt name: Card, Gift          After:  alt name: Card, Gift
+//            رنگ: color-primary-500                زشقی, لهبف
+//                                                  رنگ: color-primary-500
+//   Name:    Card                          Name:   زشقی
+//
+// Instance safety: InstanceNode is never processed — its description and
+// name are shared with the master component; writing to them would silently
+// mutate the master and affect every instance in the file.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Standard Persian keyboard layout — QWERTY key → Persian character.
- * Uppercase and lowercase Latin letters map to the same Persian character
- * (Persian script has no case distinction).
- * Digits map to their Persian-Indic equivalents.
- */
+/** Standard Persian keyboard layout — QWERTY key → Persian character. */
 const LATIN_TO_PERSIAN: Record<string, string> = {
   // ── Row 1 ──────────────────────────────────────────────────────────────────
   'q': 'ض', 'w': 'ص', 'e': 'ث', 'r': 'ق', 't': 'ف',
@@ -45,43 +54,90 @@ const LATIN_TO_PERSIAN: Record<string, string> = {
   '5': '۵', '6': '۶', '7': '۷', '8': '۸', '9': '۹',
 };
 
-/** Matches any Latin letter or ASCII digit — the characters we can translate. */
+/** Matches Latin letters and ASCII digits — the characters we can translate. */
 const LATIN_PATTERN = /[a-zA-Z0-9]/g;
 
-/** Returns true if the text contains at least one translatable character. */
+/** Matches Persian / Arabic script characters (U+0600–U+06FF). */
+const PERSIAN_SCRIPT = /[؀-ۿ]/;
+
+/**
+ * Matches an "alt name:" or "alt. name:" line and captures the value.
+ * Dot after "alt" is optional. Case-insensitive.
+ */
+const ALT_NAME_LINE = /^alt\.? name:\s*(.+)$/i;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function hasLatinChars(text: string): boolean {
   const result = LATIN_PATTERN.test(text);
   LATIN_PATTERN.lastIndex = 0; // reset stateful /g regex after .test()
   return result;
 }
 
-/** Replace every Latin letter and ASCII digit with its Persian equivalent. */
+function hasPersianChars(text: string): boolean {
+  return PERSIAN_SCRIPT.test(text);
+}
+
+/** Replace every Latin letter / ASCII digit with its Persian keyboard equivalent. */
 function transliterate(text: string): string {
   const result = text.replace(LATIN_PATTERN, (ch) => LATIN_TO_PERSIAN[ch] ?? ch);
   LATIN_PATTERN.lastIndex = 0;
   return result;
 }
 
+// ─── Description processing ───────────────────────────────────────────────────
+
 /**
- * Returns true if the node is a directly editable component definition.
- * InstanceNode is intentionally excluded — see file-level comment.
+ * Step 1 — Remove every line that:
+ *   - is non-empty, AND
+ *   - contains at least one Persian/Arabic character, AND
+ *   - contains no Latin characters.
+ * These lines are always previous plugin output. Everything else is kept.
  */
+function stripPersianLines(description: string): string {
+  return description
+    .split('\n')
+    .filter((line) => !(hasPersianChars(line) && !hasLatinChars(line) && line.trim() !== ''))
+    .join('\n');
+}
+
+/**
+ * Steps 2–3 — Walk the (already-stripped) lines. For every "alt name:" line,
+ * push the line as-is then push the transliteration immediately below it.
+ * All other lines are pushed unchanged (Step 5).
+ */
+function insertTransliterations(description: string): string {
+  const lines = description.split('\n');
+  const result: string[] = [];
+
+  for (const line of lines) {
+    result.push(line);
+    const match = line.match(ALT_NAME_LINE);
+    if (match) {
+      result.push(transliterate(match[1].trim()));
+    }
+  }
+
+  return result.join('\n');
+}
+
+/** Runs Step 1 then Steps 2–3 on a description string. */
+function processDescription(description: string): string {
+  return insertTransliterations(stripPersianLines(description));
+}
+
+// ─── Node processing ──────────────────────────────────────────────────────────
+
 function isEditableComponent(node: SceneNode): node is ComponentNode | ComponentSetNode {
   return node.type === 'COMPONENT' || node.type === 'COMPONENT_SET';
 }
 
 /**
- * Recursively walks the subtree rooted at `node` and collects all
- * ComponentNode / ComponentSetNode descendants into `results`.
+ * Recursively walks the subtree and collects ComponentNode / ComponentSetNode.
  *
- * Traversal rules:
- *  - COMPONENT / COMPONENT_SET → collect, then STOP. Never recurse into a
- *    component's internals: prevents the "all components on page get
- *    processed" bug that occurs when a component contains nested component
- *    definitions as children.
- *  - INSTANCE  → skip entirely, do not recurse (children resolve through
- *    the master and modifying them would affect the master component).
- *  - Everything else (FRAME, GROUP, SECTION …) → recurse.
+ * - COMPONENT / COMPONENT_SET → collect, stop (never recurse into internals).
+ * - INSTANCE                  → skip entirely; do not recurse.
+ * - FRAME, GROUP, SECTION …   → recurse to find nested components.
  */
 function collectComponents(
   node: SceneNode,
@@ -91,7 +147,7 @@ function collectComponents(
 
   if (isEditableComponent(node)) {
     results.push(node);
-    return; // never recurse into component internals
+    return;
   }
 
   if ('children' in node) {
@@ -102,14 +158,27 @@ function collectComponents(
 }
 
 /**
- * Transliterates Latin characters in `node.description` to Persian.
- * Returns true if the description was actually changed.
+ * Applies all five steps to a single component node.
+ * Returns true if either name or description actually changed.
  */
-function convertDescription(node: ComponentNode | ComponentSetNode): boolean {
-  const original = node.description;
-  if (!original || !hasLatinChars(original)) return false;
-  node.description = transliterate(original);
-  return true;
+function convertNode(node: ComponentNode | ComponentSetNode): boolean {
+  let changed = false;
+
+  // Step 4 — Transliterate the component name.
+  const newName = transliterate(node.name);
+  if (newName !== node.name) {
+    node.name = newName;
+    changed = true;
+  }
+
+  // Steps 1–3, 5 — Process the description.
+  const newDescription = processDescription(node.description);
+  if (newDescription !== node.description) {
+    node.description = newDescription;
+    changed = true;
+  }
+
+  return changed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,14 +192,13 @@ if (figma.command === 'convert') {
     figma.closePlugin('Nothing selected — please select one or more components first.');
   } else {
     try {
-      // 1. Collect all editable component nodes from the selection tree.
+      // Collect editable component nodes from the selection tree.
       const found: Array<ComponentNode | ComponentSetNode> = [];
       for (const node of selection) {
         collectComponents(node, found);
       }
 
-      // 2. Deduplicate by node ID (handles overlapping selections, e.g. a
-      //    frame selected alongside one of its child components).
+      // Deduplicate by node ID (handles overlapping selections).
       const unique = [...new Map(found.map((n) => [n.id, n])).values()];
 
       if (unique.length === 0) {
@@ -139,16 +207,15 @@ if (figma.command === 'convert') {
           'Select a Component or Component Set (not an instance).',
         );
       } else {
-        // 3. Transliterate and count only nodes that actually changed.
         let converted = 0;
         for (const component of unique) {
-          if (convertDescription(component)) converted++;
+          if (convertNode(component)) converted++;
         }
 
         const total = unique.length;
         if (converted === 0) {
           figma.closePlugin(
-            `Checked ${total} component${total === 1 ? '' : 's'} — no Latin characters found.`,
+            `Checked ${total} component${total === 1 ? '' : 's'} — nothing to convert.`,
           );
         } else {
           figma.closePlugin(
